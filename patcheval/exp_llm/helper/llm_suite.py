@@ -102,6 +102,12 @@ class LLMClient:
             function_content=function_content,
         )
 
+    @staticmethod
+    def _is_reasoning_model(model_name: str) -> bool:
+        """Return True for OpenAI o1/o3 reasoning models that reject temperature/max_tokens."""
+        name = (model_name or "").lower()
+        return name.startswith("o1") or name.startswith("o3")
+
     def _call_remote_api(
         self,
         prompt: str,
@@ -111,28 +117,36 @@ class LLMClient:
         """Call remote API using HTTP or SDK backends with retry and logging.
 
         Mirrors the original _call_remote_api behavior, including log messages.
+        Reasoning models (o1/o3) omit temperature and use max_completion_tokens.
         """
         api_url = self.api_url
         use_curl = self.use_curl
+        is_reasoning = self._is_reasoning_model(self.model_name)
 
         if use_curl:
-            payload = {
+            payload: Dict[str, Any] = {
                 "model": self.model_name,
                 "messages": [
-                    {"role": "system", "content": "You are a helpful assistant"},
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
                 "stream": False,
             }
+            if is_reasoning:
+                payload["max_completion_tokens"] = self.max_tokens
+            else:
+                payload["temperature"] = self.temperature
+                payload["max_tokens"] = self.max_tokens
         else:
             client = self.sdk_client
-            
-            messages = [
-                {"role": "system", "content": "You are a helpful assistant"},
-                {"role": "user", "content": prompt},
-            ]
+
+            # Reasoning models don't support a system role message
+            if is_reasoning:
+                messages = [{"role": "user", "content": prompt}]
+            else:
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant"},
+                    {"role": "user", "content": prompt},
+                ]
 
         # perform retries
         for attempt in range(max_retries + 1):
@@ -150,14 +164,19 @@ class LLMClient:
                     content = completion["choices"][0]["message"]["content"]
                     elapsed = time.time() - start_time
                 else:
-                    completion = client.chat.completions.create(
-                        model=self.model_name,
-                        messages=messages,
-                        temperature=self.temperature,
-                        max_tokens=self.max_tokens,
-                        timeout=self.timeout,
-                        stream=False,
-                    )
+                    sdk_kwargs: Dict[str, Any] = {
+                        "model": self.model_name,
+                        "messages": messages,
+                        "timeout": self.timeout,
+                        "stream": False,
+                    }
+                    if is_reasoning:
+                        sdk_kwargs["max_completion_tokens"] = self.max_tokens
+                    else:
+                        sdk_kwargs["temperature"] = self.temperature
+                        sdk_kwargs["max_tokens"] = self.max_tokens
+
+                    completion = client.chat.completions.create(**sdk_kwargs)
                     content = completion.choices[0].message.content
                     elapsed = time.time() - start_time
                     
@@ -294,28 +313,38 @@ class PatchParser:
                     results[id_match.group(1)] = patch_value
             return results
 
+        def _parse_json_block(raw: str) -> Optional[Dict[str, str]]:
+            """Try to parse a JSON block, with a fallback that fixes double-escaped quotes.
+
+            o3-mini sometimes outputs ``\\"value\\"`` instead of ``"value"`` inside
+            the ```json block, which makes json.loads fail.  Unescaping ``\\"`` → ``"``
+            fixes it without affecting legitimately escaped content inside patch strings
+            (those are ``\\\\n``, ``\\\\t``, etc., not ``\\"``)."""
+            for candidate in (raw, raw.replace('\\"', '"')):
+                try:
+                    data = json.loads(candidate)
+                    processed: Dict[str, str] = {}
+                    if isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, dict) and "id" in item and "patch" in item:
+                                processed[item["id"]] = item["patch"]
+                        if processed:
+                            return processed
+                    elif isinstance(data, dict) and "id" in data and "patch" in data:
+                        return {data["id"]: data["patch"]}
+                except json.JSONDecodeError:
+                    continue
+            return None
+
         try:
             llm_response = llm_response.strip().strip("'").strip('"')
             json_match = re.search(r"```json\n(.*?)\n```(?!.*```)", llm_response, re.DOTALL)
             if json_match:
                 llm_response = json_match.group(1).strip()
-            data = json.loads(llm_response)
-            if isinstance(data, list):
-                processed: Dict[str, str] = {}
-                for item in data:
-                    if isinstance(item, dict) and "id" in item and "patch" in item:
-                        func_id = item["id"]
-                        patch = item["patch"]
-                        processed[func_id] = patch
-                        self.logger.debug(f"JSON Extract Success patch: {patch}")
-                return processed
-            elif isinstance(data, dict):
-                processed = {}
-                func_id = data["id"]
-                patch = data["patch"]
-                processed[func_id] = patch
-                self.logger.debug(f"JSON Extract Success  patch: {patch}")
-                return processed
+            result = _parse_json_block(llm_response)
+            if result is not None:
+                self.logger.debug(f"JSON Extract Success: {list(result.keys())}")
+                return result
         except json.JSONDecodeError:
             try:
                 processed = {}
