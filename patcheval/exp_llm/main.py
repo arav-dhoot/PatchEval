@@ -54,11 +54,12 @@ def parse_args() -> argparse.Namespace:
 
     # Prompt
     parser.add_argument("--template", help="Prompt template file path (default: ./exp_llm/prompt_templates/Default.txt)", default="./exp_llm/prompt_templates/Default.txt")
+    parser.add_argument("--language", default=None, help="Only process CVEs for this language (e.g. Python, Go, JavaScript)")
     return parser.parse_args()
 
 def init():
-    OUTPUT_RESULT_DIR = "./exp_llm/output/results/"
-    OUTPUT_LOG_DIR = "./exp_llm/output/logs/"
+    OUTPUT_RESULT_DIR = "./exp_llm/output/results"
+    OUTPUT_LOG_DIR = "./exp_llm/output/logs"
     API_ENV_FILE = "exp_llm/API-ENV.json"
 
     args = parse_args()
@@ -93,17 +94,43 @@ def init():
         args.log_file = f"{OUTPUT_LOG_DIR}/fix_{args.model}_{os.path.basename(args.template).split('.')[0]}_epoch_{args.epochs}_{date_str}.log"
     return args
 
+def _status_icon(status: str) -> str:
+    return {"success": "✅", "fail": "❌", "api_failure": "🔑", "error": "💥"}.get(status, "❓")
+
+
+def _bool_icon(val) -> str:
+    if val is True:
+        return "✓"
+    if val is False:
+        return "✗"
+    return "-"
+
+
 def main() -> None:
     args = init()
     logger = setup_logger(args.log_file)
     logger.info(f"args: {args}", extra={"cve": "GLOBAL"})
-    
+
     fixer = VulFixer(args)
 
     cve_results_cache: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     cve_logs_cache: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
-    input_data=read_json(args.input)
+    input_data = read_json(args.input)
+    total_input = len(input_data)
+    poc_count = sum(1 for x in input_data if x.get("is_poc"))
+
+    # Running counters for console progress
+    cve_done = 0
+    tally: Dict[str, int] = {"success": 0, "fail": 0, "api_failure": 0, "error": 0, "other": 0}
+
+    lang_str = args.language if args.language else "all"
+    print(f"\n{'='*65}", flush=True)
+    print(f"  Model   : {args.model}", flush=True)
+    print(f"  Language: {lang_str}", flush=True)
+    print(f"  Input   : {total_input} CVEs total  ({poc_count} with PoC)", flush=True)
+    print(f"  Output  : {args.output}", flush=True)
+    print(f"{'='*65}\n", flush=True)
 
     for result in fixer.process_vulnerability(input_data):
         match result["type"]:
@@ -142,8 +169,16 @@ def main() -> None:
                         "token_stat": task_result.get("token_stat", {}),
                     }
                     cve_results_cache[cve][patch_id].append(new_patch_entry)
+
+                vul_id = task_log["vul_id"]
+                status = task_log.get("status", "unknown")
+                error = task_log.get("error", "")
+                icon = "  ✓" if status == "success" else "  ✗"
+                error_str = f"  [{error}]" if error and status != "success" else ""
+                print(f"    {icon}  {vul_id:<30}  {status}{error_str}", flush=True)
+
                 logger.info(
-                    f"Vulnerability ID: {task_log['vul_id']} Patch generation status: {task_log['status']}"
+                    f"Vulnerability ID: {vul_id} Patch generation status: {status}"
                 )
 
             case "cve_test_result":
@@ -190,6 +225,26 @@ def main() -> None:
                 with open(args.output, "w") as f:
                     json.dump(merged_results, f, indent=2, ensure_ascii=False)
 
+                # --- console progress line ---
+                cve_done += 1
+                status = test_data.get("status") or "unknown"
+                tally[status if status in tally else "other"] += 1
+                poc_ok = _bool_icon(test_data.get("poc_status"))
+                unit_ok = _bool_icon(test_data.get("unittest_status"))
+                err_type = test_data.get("error_type") or ""
+                err_str = f"  ({err_type})" if err_type and err_type != "Repair Success" else ""
+                running = (
+                    f"  success={tally['success']}  fail={tally['fail']}"
+                    f"  api_fail={tally['api_failure']}  err={tally['error']}"
+                )
+                print(
+                    f"\n[{cve_done}/{poc_count}] {_status_icon(status)}  {cve}"
+                    f"  PoC:{poc_ok}  Unit:{unit_ok}{err_str}"
+                    f"\n         {running}",
+                    flush=True,
+                )
+                # ----------------------------
+
                 logger.info(
                     f"✅ CVE {cve} (epoch: {epoch}) evaluation result: {test_data['status']} (saved)")
 
@@ -197,6 +252,16 @@ def main() -> None:
                 summary = result["data"]
                 logger.info(f"⏱️ Total duration: {summary['total_duration']}s")
                 process_results_and_save(args.output, args.input)
+
+                print(f"\n{'='*65}", flush=True)
+                print(f"  Finished in {summary['total_duration']}s", flush=True)
+                print(
+                    f"  Results  —  success: {tally['success']}  |  fail: {tally['fail']}"
+                    f"  |  api_failure: {tally['api_failure']}  |  error: {tally['error']}",
+                    flush=True,
+                )
+                print(f"  Output saved to: {args.output}", flush=True)
+                print(f"{'='*65}\n", flush=True)
 
 
 if __name__ == "__main__":
