@@ -246,7 +246,9 @@ def main():
         return cve2lang
 
     import utils
-    if args.artifact_eval:
+    if args.full_function:
+        patchs = utils.convert_json_full_function(args.patch_file, args.input_file)
+    elif args.artifact_eval:
         patchs = utils.convert_json(args.patch_file)
     else:
         if args.patch_file.endswith(".json"):
@@ -443,6 +445,7 @@ if __name__ == "__main__":
     parser.add_argument("--input_file", type=str, required=False, default="../datasets/input.json")
     parser.add_argument("--log_level", type=str, required=False, default="INFO")
     parser.add_argument("--artifact_eval", action="store_true", default=False, required=False, help="Use this mode only when evaluating results in the patcheval/log/llm directory.")
+    parser.add_argument("--full_function", action="store_true", default=False, required=False, help="Synthesize diffs from full-function fix_code output instead of using pre-computed diff_content.")
     parser.add_argument("--max_workers", type=int, default=4, required=False, help="max workers")
     args = parser.parse_args()
     main()
