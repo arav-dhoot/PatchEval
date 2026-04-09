@@ -121,6 +121,7 @@ class VulFixer:
         self.logger.info(f"existing_cves: {existing_cves}", extra={"cve": "GLOBAL"})
 
         # filter CVE entries to process (skip existing or configured)
+        language_filter = getattr(self.args, 'language', None)
         valid_cves = []
         
         for input_item in input_data:
@@ -131,7 +132,8 @@ class VulFixer:
                 self.logger.info(f"EXISTED CVE: {cve}, SKIP PROCESS", extra={"cve": "GLOBAL"})
                 continue
             if poc is False:
-                # self.logger.info(f"NO POC: {cve}", extra={"cve": "GLOBAL"})
+                continue
+            if language_filter and input_item.get("programming_language") != language_filter:
                 continue
             valid_cves.append((cve, vul_entries))
 
