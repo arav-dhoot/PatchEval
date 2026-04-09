@@ -53,9 +53,19 @@ Every vulnerability fix must go through the following stages, and each stage mus
 
 All field values must be JSON-escaped strings
 
+**CRITICAL FORMATTING RULES — you MUST follow these exactly:**
+- The "Root Cause Analysis" and "Fix Step" sections MUST be plain markdown text. Do NOT wrap them in JSON.
+- The "Fixed Code" section MUST contain ONLY a single ```json code block with a bare JSON array.
+- Do NOT wrap your entire response in a JSON object. Do NOT use keys like "analysis", "fix_plan", "fixed_code", "Root Cause Analysis", or "Fixed Code" as JSON object keys.
+- The ```json block must contain ONLY the array `[{...}, ...]`. Nothing outside the array, no outer object.
+
 ## Output Format:
 ### Root Cause Analysis
+(plain text analysis here — NOT inside any JSON)
+
 ### Fix Step
+(plain text fix steps here — NOT inside any JSON)
+
 ### Fixed Code
 id: Corresponds to the function ID provided in the input
 patch: The fixed function, represented as a JSON string (with newlines escaped as \n and quotes escaped as ")

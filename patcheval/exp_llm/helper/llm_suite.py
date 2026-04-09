@@ -18,6 +18,7 @@ import os
 import requests
 import shutil
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import json_repair
 from string import Template
 from openai import OpenAI
 
@@ -313,52 +314,92 @@ class PatchParser:
                     results[id_match.group(1)] = patch_value
             return results
 
-        def _parse_json_block(raw: str) -> Optional[Dict[str, str]]:
-            """Try to parse a JSON block, with a fallback that fixes double-escaped quotes.
-
-            o3-mini sometimes outputs ``\\"value\\"`` instead of ``"value"`` inside
-            the ```json block, which makes json.loads fail.  Unescaping ``\\"`` → ``"``
-            fixes it without affecting legitimately escaped content inside patch strings
-            (those are ``\\\\n``, ``\\\\t``, etc., not ``\\"``)."""
-            for candidate in (raw, raw.replace('\\"', '"')):
-                try:
-                    data = json.loads(candidate)
-                    processed: Dict[str, str] = {}
-                    if isinstance(data, list):
-                        for item in data:
+        def _extract_id_patch(data: Any) -> Optional[Dict[str, str]]:
+            """Pull id/patch pairs out of an already-parsed Python object."""
+            results: Dict[str, str] = {}
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and "id" in item and "patch" in item:
+                        results[item["id"]] = item["patch"]
+                return results or None
+            if isinstance(data, dict):
+                if "id" in data and "patch" in data:
+                    return {data["id"]: data["patch"]}
+                # Wrapper object — model sometimes outputs the whole response as
+                # {"analysis": "...", "fix_plan": "...", "fixed_code": [...]}
+                for key in ("fixed_code", "Fixed Code", "patches",
+                            "patch_list", "fixed_functions", "fixes"):
+                    val = data.get(key)
+                    if isinstance(val, list):
+                        for item in val:
                             if isinstance(item, dict) and "id" in item and "patch" in item:
-                                processed[item["id"]] = item["patch"]
-                        if processed:
-                            return processed
-                    elif isinstance(data, dict) and "id" in data and "patch" in data:
-                        return {data["id"]: data["patch"]}
+                                results[item["id"]] = item["patch"]
+                        if results:
+                            return results
+            return None
+
+        def _parse_json_block(raw: str) -> Optional[Dict[str, str]]:
+            """Parse a JSON string into id→patch pairs.
+
+            Three-stage attempt:
+            1. ``json.loads`` (strict) on the raw candidate.
+            2. ``json_repair.loads`` (lenient) — fixes truncated / malformed JSON.
+            3. Same two steps with double-escaped quotes normalised
+               (o3-mini occasionally emits ``\\"value\\"`` instead of ``"value"``).
+            Returns None if nothing yields usable id/patch pairs.
+            """
+            candidates = [raw]
+            unescaped = raw.replace('\\"', '"')
+            if unescaped != raw:
+                candidates.append(unescaped)
+
+            for candidate in candidates:
+                # Stage 1 — strict
+                try:
+                    result = _extract_id_patch(json.loads(candidate))
+                    if result is not None:
+                        return result
                 except json.JSONDecodeError:
-                    continue
+                    pass
+
+                # Stage 2 — lenient (json_repair)
+                try:
+                    repaired = json_repair.loads(candidate)
+                    result = _extract_id_patch(repaired)
+                    if result is not None:
+                        self.logger.debug("json_repair recovered malformed JSON")
+                        return result
+                except Exception:
+                    pass
+
             return None
 
         try:
             llm_response = llm_response.strip().strip("'").strip('"')
+
+            # Prefer content inside a ```json … ``` block when present
             json_match = re.search(r"```json\n(.*?)\n```(?!.*```)", llm_response, re.DOTALL)
-            if json_match:
-                llm_response = json_match.group(1).strip()
-            result = _parse_json_block(llm_response)
-            if result is not None:
+            block = json_match.group(1).strip() if json_match else llm_response
+
+            # 1. Structured JSON block (array or wrapper object)
+            result = _parse_json_block(block)
+            if result:
                 self.logger.debug(f"JSON Extract Success: {list(result.keys())}")
                 return result
-        except json.JSONDecodeError:
-            try:
-                processed = {}
-                patches = extract_patches(llm_response)
+
+            # 2. Regex scan for any balanced {…} objects containing id+patch
+            #    (fallback for malformed / non-code-block JSON output)
+            patches = extract_patches(llm_response)
+            if patches:
+                processed: Dict[str, str] = {}
                 for func_id, patch in patches.items():
                     if patch.count("\\n ") > 2 or patch.count("\\n\\t") > 2:
                         patch = self.encode(patch)
                     processed[func_id] = patch
-                    self.logger.debug(f"Regex Extract Success patch: {patch}")
+                self.logger.debug(f"Regex Extract Success: {list(processed.keys())}")
                 return processed
-            except Exception as e:
-                msg = f"Regex Extract Failed: {str(e)}, LLM Response: {repr(llm_response)}"
-                self.logger.error(msg)
-                return {}
+
+            return {}
         except Exception as e:
             self.logger.error(f"Postprocess Code Failed: {str(e)}")
             return {}

@@ -137,6 +137,11 @@ class VulFixer:
                 continue
             valid_cves.append((cve, vul_entries))
 
+        test_size = getattr(self.args, 'test_size', None)
+        if test_size:
+            valid_cves = valid_cves[:test_size]
+            self.logger.info(f"Test mode: limiting to {test_size} CVEs", extra={"cve": "GLOBAL"})
+
         self.logger.info(f"Multi-threading: {self.args.max_workers}", extra={"cve": "GLOBAL"})
         specs = [
             TaskSpec(

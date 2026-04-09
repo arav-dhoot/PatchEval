@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     # Prompt
     parser.add_argument("--template", help="Prompt template file path (default: ./exp_llm/prompt_templates/Default.txt)", default="./exp_llm/prompt_templates/Default.txt")
     parser.add_argument("--language", default=None, help="Only process CVEs for this language (e.g. Python, Go, JavaScript)")
+    parser.add_argument("--test_size", type=int, default=None, help="Limit to N CVEs for a quick test run (reflected in output filename)")
     return parser.parse_args()
 
 def init():
@@ -87,11 +88,13 @@ def init():
 
     date_str = datetime.now().strftime('%Y_%m%d_%H%M')
 
+    test_tag = f"_test{args.test_size}" if args.test_size else ""
+    base_name = f"fix_{args.model}_{os.path.basename(args.template).split('.')[0]}_epoch_{args.epochs}{test_tag}_{date_str}"
+
     if not args.output:
-        args.output = f"{OUTPUT_RESULT_DIR}/fix_{args.model}_{os.path.basename(args.template).split('.')[0]}_epoch_{args.epochs}_{date_str}.json"
-    
+        args.output = f"{OUTPUT_RESULT_DIR}/{base_name}.json"
     if not args.log_file:
-        args.log_file = f"{OUTPUT_LOG_DIR}/fix_{args.model}_{os.path.basename(args.template).split('.')[0]}_epoch_{args.epochs}_{date_str}.log"
+        args.log_file = f"{OUTPUT_LOG_DIR}/{base_name}.log"
     return args
 
 def _status_icon(status: str) -> str:
@@ -123,6 +126,8 @@ def main() -> None:
     # Running counters for console progress
     cve_done = 0
     tally: Dict[str, int] = {"success": 0, "fail": 0, "api_failure": 0, "error": 0, "other": 0}
+    # Buffer function-level status lines per CVE; flushed when the CVE test result arrives
+    func_lines_buffer: Dict[str, List[str]] = defaultdict(list)
 
     lang_str = args.language if args.language else "all"
     print(f"\n{'='*65}", flush=True)
@@ -175,7 +180,7 @@ def main() -> None:
                 error = task_log.get("error", "")
                 icon = "  ✓" if status == "success" else "  ✗"
                 error_str = f"  [{error}]" if error and status != "success" else ""
-                print(f"    {icon}  {vul_id:<30}  {status}{error_str}", flush=True)
+                func_lines_buffer[cve].append(f"    {icon}  {vul_id:<30}  {status}{error_str}")
 
                 logger.info(
                     f"Vulnerability ID: {vul_id} Patch generation status: {status}"
@@ -237,9 +242,15 @@ def main() -> None:
                     f"  success={tally['success']}  fail={tally['fail']}"
                     f"  api_fail={tally['api_failure']}  err={tally['error']}"
                 )
+                # Flush buffered function lines for this CVE, then print the summary.
+                # This guarantees function lines always appear under their own CVE header
+                # even when multi-threading causes results to arrive out of submission order.
+                buffered = func_lines_buffer.pop(cve, [])
+                func_block = ("\n" + "\n".join(buffered)) if buffered else ""
                 print(
                     f"\n[{cve_done}/{poc_count}] {_status_icon(status)}  {cve}"
                     f"  PoC:{poc_ok}  Unit:{unit_ok}{err_str}"
+                    f"{func_block}"
                     f"\n         {running}",
                     flush=True,
                 )
