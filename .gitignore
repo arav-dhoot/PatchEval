@@ -1,0 +1,5 @@
+patcheval/exp_llm/projects
+patcheval/exp_llm/projects_test
+patcheval/exp_llm/output
+patcheval/exp_llm/API-ENV.json
+**/__pycache__
