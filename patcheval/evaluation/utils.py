@@ -85,3 +85,69 @@ def convert_json(json_file, epoch=1):
                     })
                     break
     return eval_datas
+
+
+## Addition:
+
+def convert_json_full_function(json_file, input_file, epoch=1):
+    """
+    Convert full-function LLM output to evaluation format by synthesizing diffs on-the-fly.
+
+    Unlike convert_json (which reads the pre-computed diff_content field), this function
+    takes the raw patched functions stored in fix_code and reconstructs a git-apply-
+    compatible unified diff using the original snippet and line metadata from input.json.
+
+    Args:
+        json_file:  Path to the exp_llm result JSON (e.g. fix_gpt-4_Default_epoch_1_*.json).
+        input_file: Path to datasets/input.json (provides snippet, start_line, file_path).
+        epoch:      Which epoch to evaluate (1-based, default 1).
+
+    Returns:
+        List of {"cve": str, "fix_patch": str} dicts, same shape as convert_json output.
+    """
+    from diff_synthesizer import synthesize_diff
+
+    origin_datas = read_json(json_file)
+    input_datas = read_json(input_file)
+
+    # Build lookup: cve_id -> {vul_id -> vul_func metadata dict}
+    cve_vul_info = {}
+    for item in input_datas:
+        cve = item["cve_id"]
+        cve_vul_info[cve] = {vul["id"]: vul for vul in item.get("vul_func", [])}
+
+    eval_datas = []
+    for origin_data in origin_datas:
+        for cve, items in origin_data.items():
+            for item in items:
+                if item.get("epoch") != epoch:
+                    continue
+
+                fix_code = item.get("fix_code")
+                if not fix_code or not isinstance(fix_code, dict):
+                    continue  # this entry has no fix_code; keep looking in this CVE's list
+
+                vul_info = cve_vul_info.get(cve, {})
+                all_diffs = []
+
+                for vul_id, patched_func in fix_code.items():
+                    if not patched_func or vul_id not in vul_info:
+                        continue
+                    meta = vul_info[vul_id]
+                    diff = synthesize_diff(
+                        original_snippet=meta["snippet"],
+                        patched_function=patched_func,
+                        file_path=meta["file_path"],
+                        start_line=int(meta["start_line"]),
+                    )
+                    if diff:
+                        all_diffs.append(diff)
+
+                if all_diffs:
+                    eval_datas.append({
+                        "cve": cve,
+                        "fix_patch": "\n".join(all_diffs),
+                    })
+                break  # first matching epoch found
+
+    return eval_datas
